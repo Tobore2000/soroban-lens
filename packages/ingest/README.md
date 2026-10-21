@@ -92,6 +92,17 @@ node do not resynchronise into a thundering herd.
 **Five contract ids per filter.** The RPC caps it. `buildFilters()` chunks
 larger sets across multiple filters automatically.
 
+**Page size adapts while you run (#14).** `pageSize` is where adaptation
+*starts*, not a fixed value. After each page the poller grows the size toward
+`pageSizeMax` while pages come back full and fast (fewer round trips on a busy
+contract), and shrinks it toward `pageSizeMin` when a response is slower than
+`pageSizeSlowMs` — a response that needed retries is slow by construction,
+because the poller times the whole call including retry backoff. Pin the size
+by setting `pageSizeMin = pageSizeMax = pageSize`, which disables adaptation
+and restores the original fixed-page behaviour. The bounds are configurable
+through `PollerOptions`, the flags above, and `LENS_PAGE_SIZE_MIN` /
+`LENS_PAGE_SIZE_MAX` / `LENS_PAGE_SIZE_SLOW_MS`.
+
 ## Configuration
 
 | Flag | Env | Default |
@@ -101,7 +112,10 @@ larger sets across multiple filters automatically.
 | `--rpc-url`, `-r` | `LENS_RPC_URL` | the network preset |
 | `--cursor-dir` | `LENS_DATA_DIR` | `./data` |
 | `--start-ledger` | — | oldest retained ledger |
-| `--page-size` | — | `200` (max `10000`) |
+| `--page-size` | — | `200` (starting size; adapts, see below) |
+| `--page-size-min` | `LENS_PAGE_SIZE_MIN` | `50` |
+| `--page-size-max` | `LENS_PAGE_SIZE_MAX` | `10000` (the RPC ceiling) |
+| `--page-size-slow-ms` | `LENS_PAGE_SIZE_SLOW_MS` | `5000` |
 | `--poll-interval` | — | `2000` ms |
 | `--once` | — | off — exit once caught up |
 | `--no-resume` | — | off — ignore stored cursors |

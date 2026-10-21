@@ -25,6 +25,18 @@ export interface PollerDeps {
  */
 export const APPROX_LEDGER_SECONDS = 5;
 
+/**
+ * Adaptive page-size defaults (#14). The poller starts at `pageSize` and grows
+ * it toward `pageSizeMax` while pages come back full and fast, shrinking toward
+ * `pageSizeMin` when a response is slower than `pageSizeSlowMs`. Every value is
+ * overridable through `PollerOptions`, so these are the fallbacks, not policy.
+ */
+const DEFAULT_PAGE_SIZE = 200;
+const DEFAULT_PAGE_SIZE_MIN = 50;
+const DEFAULT_PAGE_SIZE_GROW = 2;
+const DEFAULT_PAGE_SIZE_SHRINK = 0.5;
+const DEFAULT_PAGE_SIZE_SLOW_MS = 5000;
+
 /** Emitted alongside batches so callers can show progress without extra RPC calls. */
 export interface PollerProgress {
   cursor: string;
@@ -119,7 +131,12 @@ export class EventPoller {
 
   /** Yields pages of events until aborted. */
   async *stream(): AsyncGenerator<EventBatch & { progress: PollerProgress }> {
-    const pageSize = this.#options.pageSize ?? 200;
+    // Adaptive page sizing (#14): start at `pageSize` and let it drift between
+    // the configured bounds while we run. `pageSize` is a `let` on purpose —
+    // every loop reads the *current* value into `limit` for that one request,
+    // then adjusts `pageSize` for the next.
+    const bounds = resolvePageSizeBounds(this.#options);
+    let pageSize = this.#options.pageSize ?? DEFAULT_PAGE_SIZE;
     const idleMs = this.#options.pollIntervalMs ?? 2000;
     const filters = buildFilters(
       this.#options.contractIds,
@@ -129,18 +146,24 @@ export class EventPoller {
     // At-least-once delivery means a crash mid-write replays the last batch.
     // Module 2 absorbs that with INSERT OR IGNORE, but every other consumer —
     // the NDJSON stdout path, for one — would emit the repeat. Drop repeats
-    // here so "at least once" is not every consumer's problem to solve.
-    const seen = new RecentIds(pageSize * RECENT_ID_WINDOW_PAGES);
+    // here so "at least once" is not every consumer's problem to solve. The
+    // window is sized to the *upper* bound: a grown page can be up to that big,
+    // and a replay re-serves exactly that many ids, so the window must hold
+    // at least one maxed-out page.
+    const seen = new RecentIds(bounds.max * RECENT_ID_WINDOW_PAGES);
 
     const endLedger = this.#options.endLedger;
     let { cursor, startLedger } = await this.#resolveStart();
 
     while (!this.#signal?.aborted) {
+      // `limit` is frozen for this request; `pageSize` may change after it.
+      const limit = pageSize;
+      const requestStart = performance.now();
       let batch: EventBatch;
       try {
         batch = await this.#client.getEvents({
           filters,
-          limit: pageSize,
+          limit,
           ...(endLedger !== undefined ? { endLedger } : {}),
           ...(cursor ? { cursor } : { startLedger: startLedger as number }),
         });
@@ -163,9 +186,11 @@ export class EventPoller {
         throw error;
       }
 
+      const elapsedMs = performance.now() - requestStart;
+
       // caughtUp reflects what the RPC returned, not what survived dedup: a
       // full page of repeats still means there is more history to walk.
-      const caughtUp = batch.events.length < pageSize;
+      const caughtUp = batch.events.length < limit;
       const fresh = batch.events.filter((event) => seen.add(event.id));
       const lastLedger = batch.events.at(-1)?.ledger ?? 0;
 
@@ -173,7 +198,7 @@ export class EventPoller {
       // from one that merely filled the configured page size: it means a single
       // request straddled more events than the node will ever return at once,
       // so the page boundary is the node's limit rather than ours.
-      if (!caughtUp && pageSize >= MAX_PAGE_SIZE) {
+      if (!caughtUp && limit >= MAX_PAGE_SIZE) {
         this.#log(
           `page hit the RPC ceiling of ${MAX_PAGE_SIZE} events at ledger ${lastLedger}; ` +
             'this ledger range emits more events than one request can return. ' +
@@ -210,6 +235,19 @@ export class EventPoller {
       });
       this.#metrics?.eventsIngested(fresh.length);
       this.#metrics?.progress(lastLedger || batch.latestLedger, batch.latestLedger);
+
+      // Adapt the page size for the next request (#14). This runs only once the
+      // consumer has pulled the next batch, so a consumer that stops here never
+      // sees a change — the adjustment is for the *following* request. Grow on a
+      // full, fast page; shrink on a slow one; leave it alone when caught up.
+      const next = adjustPageSize(pageSize, !caughtUp, elapsedMs, bounds);
+      if (next !== pageSize) {
+        const why = elapsedMs >= bounds.slowMs
+          ? `slow response (${Math.round(elapsedMs)}ms)`
+          : 'full, fast';
+        this.#log(`page size ${pageSize} -> ${next} (${why})`);
+        pageSize = next;
+      }
 
       cursor = batch.cursor;
       startLedger = undefined;
@@ -285,6 +323,62 @@ function isCursorOutOfRange(error: unknown): boolean {
     /\bno longer (?:available|retained|in the retention window)\b/i.test(message);
 
   return aboutPosition && outOfRange;
+}
+
+/**
+ * Resolved adaptive page-size bounds, with defaults and invalid-config guards
+ * applied. `min`/`max` are the floor/ceiling for adaptation, `slowMs` is the
+ * latency that triggers a shrink, and `grow`/`shrink` are the multipliers.
+ */
+interface PageSizeBounds {
+  min: number;
+  max: number;
+  grow: number;
+  shrink: number;
+  slowMs: number;
+}
+
+/**
+ * Turn the optional `PollerOptions` page-size knobs into concrete numbers, with
+ * the same defaults whether the caller set nothing or set something unparseable.
+ *
+ * `min` is clamped up to 1 and `max` down to the RPC ceiling; if a caller inverts
+ * them, `max` is raised to `min` so adaptation never widens the range beyond the
+ * intended floor. The starting `pageSize` itself is deliberately NOT clamped —
+ * an explicit small page size is honoured as the starting point, and only the
+ * *direction* of subsequent adaptation is bounded.
+ */
+function resolvePageSizeBounds(options: PollerOptions): PageSizeBounds {
+  const min = Math.max(1, Math.floor(options.pageSizeMin ?? DEFAULT_PAGE_SIZE_MIN));
+  const max = Math.min(MAX_PAGE_SIZE, Math.max(min, Math.floor(options.pageSizeMax ?? MAX_PAGE_SIZE)));
+  const grow = options.pageSizeGrow ?? DEFAULT_PAGE_SIZE_GROW;
+  const shrink = options.pageSizeShrink ?? DEFAULT_PAGE_SIZE_SHRINK;
+  const slowMs = Math.max(0, options.pageSizeSlowMs ?? DEFAULT_PAGE_SIZE_SLOW_MS);
+  return { min, max, grow, shrink, slowMs };
+}
+
+/**
+ * One step of the adaptive policy (#14), called after every successful page.
+ *
+ * - Slow response (at or past `slowMs`, including a call that needed retries,
+ *   since the poller times the whole call): shrink toward `min`, because a
+ *   large page is what is making the node struggle.
+ * - Full and fast page: grow toward `max`, because the node has more history to
+ *   give and kept up with the ask — bigger pages mean fewer round trips.
+ * - Fast but not full (caught up): no change. The page size is fine where it is.
+ */
+function adjustPageSize(current: number, full: boolean, elapsedMs: number, bounds: PageSizeBounds): number {
+  if (elapsedMs >= bounds.slowMs) {
+    return clampPage(current * bounds.shrink, bounds.min, bounds.max);
+  }
+  if (full) {
+    return clampPage(current * bounds.grow, bounds.min, bounds.max);
+  }
+  return current;
+}
+
+function clampPage(n: number, min: number, max: number): number {
+  return Math.min(Math.max(Math.round(n), min), max);
 }
 
 /**

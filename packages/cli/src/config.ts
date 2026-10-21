@@ -9,6 +9,12 @@ export interface LensConfig {
   apiPort: number;
   startLedger: number | undefined;
   pageSize: number;
+  /** Adaptive page-size lower bound. `LENS_PAGE_SIZE_MIN`. Defaults to 50. (#14) */
+  pageSizeMin: number;
+  /** Adaptive page-size upper bound. `LENS_PAGE_SIZE_MAX`. Defaults to 10000. (#14) */
+  pageSizeMax: number;
+  /** Response latency (ms) that shrinks the page size. `LENS_PAGE_SIZE_SLOW_MS`. Defaults to 5000. (#14) */
+  pageSizeSlowMs: number;
   pollIntervalMs: number;
   /** Extra headers for every RPC request. Values are secrets — never log them. */
   rpcHeaders: Record<string, string>;
@@ -35,6 +41,9 @@ export interface ConfigOverrides {
   port?: number | undefined;
   startLedger?: number | undefined;
   pageSize?: number | undefined;
+  pageSizeMin?: number | undefined;
+  pageSizeMax?: number | undefined;
+  pageSizeSlowMs?: number | undefined;
   pollInterval?: number | undefined;
   rpcHeaders?: string[] | undefined;
   retryAttempts?: number | undefined;
@@ -67,6 +76,9 @@ export function resolveConfig(
     apiPort: overrides.port ?? numberOr(env.LENS_API_PORT, 8080),
     startLedger: overrides.startLedger ?? optionalNumber(env.LENS_START_LEDGER),
     pageSize: overrides.pageSize ?? numberOr(env.LENS_PAGE_SIZE, 200),
+    pageSizeMin: overrides.pageSizeMin ?? numberOr(env.LENS_PAGE_SIZE_MIN, 50),
+    pageSizeMax: overrides.pageSizeMax ?? numberOr(env.LENS_PAGE_SIZE_MAX, 10000),
+    pageSizeSlowMs: overrides.pageSizeSlowMs ?? numberOr(env.LENS_PAGE_SIZE_SLOW_MS, 5000),
     pollIntervalMs: overrides.pollInterval ?? numberOr(env.LENS_POLL_INTERVAL_MS, 2000),
     rpcHeaders: parseHeaders(overrides.rpcHeaders, env.LENS_RPC_HEADERS),
     retry: {

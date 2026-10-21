@@ -87,8 +87,41 @@ export interface PollerOptions {
    * possible without watching the log and killing the process.
    */
   endLedger?: number;
-  /** Events per RPC page, 1..10000. Defaults to 200. */
+  /**
+   * Events per RPC page, 1..10000. Defaults to 200. This is the **starting**
+   * page size: the poller adapts it between `pageSizeMin` and `pageSizeMax`
+   * while it runs (#14), so the value you set is where adaptation begins, not a
+   * fixed ceiling.
+   */
   pageSize?: number;
+  /**
+   * Adaptive page-size lower bound. The page size never shrinks below this on a
+   * slow response. Defaults to 50. Set it equal to `pageSize` (and `pageSizeMax`
+   * to `pageSize`) to pin the page size and disable adaptation. (#14)
+   */
+  pageSizeMin?: number;
+  /**
+   * Adaptive page-size upper bound. The page size never grows above this on a
+   * full, fast page. Defaults to the RPC ceiling (10000). (#14)
+   */
+  pageSizeMax?: number;
+  /**
+   * Multiplier applied when growing the page size after a full, fast page.
+   * Defaults to 2 (double). Must be greater than 1 to grow. (#14)
+   */
+  pageSizeGrow?: number;
+  /**
+   * Multiplier applied when shrinking the page size after a slow response.
+   * Defaults to 0.5 (halve). Must be between 0 and 1 to shrink. (#14)
+   */
+  pageSizeShrink?: number;
+  /**
+   * Response latency, in milliseconds, above which a page is "slow" and the
+   * page size shrinks. A response that needed retries is slow by construction,
+   * because the poller times the whole call including retry backoff. Defaults
+   * to 5000. (#14)
+   */
+  pageSizeSlowMs?: number;
   /** Milliseconds to wait after catching up to the tip. Defaults to 2000. */
   pollIntervalMs?: number;
   /** Extra topic filters, base64 ScVal segments or "*". */
