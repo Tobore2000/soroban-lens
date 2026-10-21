@@ -55,7 +55,12 @@ Options:
   -d, --db <path>         SQLite file. (env LENS_DB_PATH, default ./data/lens.db)
       --data-dir <path>   Working directory for state. (env LENS_DATA_DIR)
       --start-ledger <n>  First ledger when no cursor is stored. (env LENS_START_LEDGER)
-      --page-size <n>     Events per RPC page, 1-10000. (env LENS_PAGE_SIZE)
+      --page-size <n>     Events per RPC page, 1-10000. The starting size; it
+                          adapts between --page-size-min and --page-size-max. (env LENS_PAGE_SIZE)
+      --page-size-min <n> Adaptive lower bound. Set equal to --page-size and
+                          --page-size-max to disable adapting. (env LENS_PAGE_SIZE_MIN, default 50)
+      --page-size-max <n> Adaptive upper bound. (env LENS_PAGE_SIZE_MAX, default 10000)
+      --page-size-slow-ms <ms>  Response latency that shrinks the page size. (env LENS_PAGE_SIZE_SLOW_MS, default 5000)
       --poll-interval <n> Milliseconds to wait at the tip. (env LENS_POLL_INTERVAL_MS)
       --once              index: stop once caught up to the network tip.
       --max-events <n>    index: stop after this many events.
@@ -87,6 +92,9 @@ async function main(argv: string[]): Promise<number> {
       'data-dir': { type: 'string' },
       'start-ledger': { type: 'string' },
       'page-size': { type: 'string' },
+      'page-size-min': { type: 'string' },
+      'page-size-max': { type: 'string' },
+      'page-size-slow-ms': { type: 'string' },
       'poll-interval': { type: 'string' },
       'rpc-header': { type: 'string', multiple: true },
       'retry-attempts': { type: 'string' },
@@ -118,6 +126,9 @@ async function main(argv: string[]): Promise<number> {
     ...(values['data-dir'] !== undefined ? { dataDir: values['data-dir'] } : {}),
     ...(values['start-ledger'] !== undefined ? { startLedger: Number(values['start-ledger']) } : {}),
     ...(values['page-size'] !== undefined ? { pageSize: Number(values['page-size']) } : {}),
+    ...(values['page-size-min'] !== undefined ? { pageSizeMin: Number(values['page-size-min']) } : {}),
+    ...(values['page-size-max'] !== undefined ? { pageSizeMax: Number(values['page-size-max']) } : {}),
+    ...(values['page-size-slow-ms'] !== undefined ? { pageSizeSlowMs: Number(values['page-size-slow-ms']) } : {}),
     ...(values['poll-interval'] !== undefined ? { pollInterval: Number(values['poll-interval']) } : {}),
     ...(values['rpc-header'] !== undefined ? { rpcHeaders: values['rpc-header'] } : {}),
     ...(values['retry-attempts'] !== undefined ? { retryAttempts: Number(values['retry-attempts']) } : {}),

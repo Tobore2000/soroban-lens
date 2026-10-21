@@ -84,7 +84,13 @@ Options:
   -n, --network <name>     ${Object.keys(NETWORKS).join(' | ')}  (default: testnet)
   -r, --rpc-url <url>      Override the network's RPC URL.
       --start-ledger <n>   First ledger to read when no cursor is stored.
-      --page-size <n>      Events per RPC page, 1-10000 (default: 200).
+      --page-size <n>      Events per RPC page, 1-10000 (default: 200). The
+                           starting size; it adapts between --page-size-min and
+                           --page-size-max while running (#14).
+      --page-size-min <n>  Adaptive lower bound (default: 50). Set equal to
+                           --page-size and --page-size-max to disable adapting.
+      --page-size-max <n>  Adaptive upper bound (default: 10000, the RPC ceiling).
+      --page-size-slow-ms <ms>  Response latency that shrinks the page size (default: 5000).
       --poll-interval <ms> Wait after catching up to the tip (default: 2000).
       --end-ledger <n>     Last ledger to read. Exits cleanly once passed.
       --type <kind>        contract | system | diagnostic (default: contract).
@@ -108,6 +114,7 @@ Options:
 Environment:
   LENS_NETWORK, LENS_RPC_URL, LENS_CONTRACT_IDS (comma separated), LENS_DATA_DIR
   LENS_RPC_HEADERS (comma separated 'Name: value' pairs)
+  LENS_PAGE_SIZE_MIN, LENS_PAGE_SIZE_MAX, LENS_PAGE_SIZE_SLOW_MS
   LENS_RETRY_ATTEMPTS, LENS_RETRY_BASE_DELAY_MS, LENS_RETRY_MAX_DELAY_MS
   LENS_METRICS_PORT, LENS_METRICS_HOST
 
@@ -126,6 +133,9 @@ async function main(argv: string[]): Promise<number> {
       'rpc-url': { type: 'string', short: 'r' },
       'start-ledger': { type: 'string' },
       'page-size': { type: 'string' },
+      'page-size-min': { type: 'string' },
+      'page-size-max': { type: 'string' },
+      'page-size-slow-ms': { type: 'string' },
       'poll-interval': { type: 'string' },
       'end-ledger': { type: 'string' },
       type: { type: 'string' },
@@ -246,6 +256,9 @@ async function main(argv: string[]): Promise<number> {
       ...(endLedger !== undefined ? { endLedger } : {}),
       ...(startLedger !== undefined ? { startLedger } : {}),
       ...(values['page-size'] ? { pageSize: Number(values['page-size']) } : {}),
+      ...numeric('pageSizeMin', values['page-size-min'] ?? process.env.LENS_PAGE_SIZE_MIN),
+      ...numeric('pageSizeMax', values['page-size-max'] ?? process.env.LENS_PAGE_SIZE_MAX),
+      ...numeric('pageSizeSlowMs', values['page-size-slow-ms'] ?? process.env.LENS_PAGE_SIZE_SLOW_MS),
       ...(values['poll-interval'] ? { pollIntervalMs: Number(values['poll-interval']) } : {}),
     },
     {

@@ -53,6 +53,41 @@ async function take(stream, n) {
   return out;
 }
 
+/** Consume every batch until the generator returns (a bounded `endLedger` run). */
+async function drain(stream) {
+  const out = [];
+  for await (const batch of stream) out.push(batch);
+  return out;
+}
+
+const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * A scripted client that simulates a contract with `total` events buffered: it
+ * serves exactly `args.limit` per page (a full page) until the backlog runs
+ * out, then a short page. `latencyMs` adds a real per-call delay so the poller
+ * sees a measurable response time — fast pages for the grow/benchmark cases,
+ * slow pages for the shrink case. Tracks round trips and thrown errors.
+ */
+function busyClient({ total, latencyMs = 0 }) {
+  let served = 0;
+  const baseLedger = 4695000;
+  return {
+    rpcUrl: 'https://soroban-testnet.stellar.org',
+    requests: [],
+    errors: 0,
+    async retention() { return { latestLedger: 4697000, oldestLedger: 4690000 }; },
+    async getEvents(args) {
+      this.requests.push(args);
+      if (latencyMs > 0) await delay(latencyMs);
+      const count = Math.min(args.limit, total - served);
+      const events = Array.from({ length: count }, (_, i) => rawEvent(baseLedger + served + i, served + i));
+      served += count;
+      return { events, cursor: `c${served}`, latestLedger: 4697000, oldestLedger: 4690000 };
+    },
+  };
+}
+
 test('metrics advance after acknowledgement and include empty-page progress', async () => {
   const metrics = new IngestMetrics();
   const abort = new AbortController();
@@ -528,4 +563,78 @@ test('topic filters are passed through to the RPC filter', async () => {
   );
   await take(poller.stream(), 1);
   assert.deepEqual(client.requests[0].filters[0].topics, topics);
+});
+
+// ── #14 adaptive page size ─────────────────────────────────────────────────
+
+test('adaptive page size grows toward the max on full, fast pages', async () => {
+  const client = busyClient({ total: 10000 }); // latency 0 → fast
+  await drain(new EventPoller(
+    { contractIds: [SAC], startLedger: 4695000, endLedger: 4697000, pageSize: 200 },
+    { client, cursors: new MemoryCursorStore(), sleep: async () => {} },
+  ).stream());
+  const limits = client.requests.map((r) => r.limit);
+
+  assert.equal(limits[0], 200, 'starts at the configured page size');
+  assert.equal(limits[1], 400, 'doubles after the first full, fast page');
+  assert.equal(limits[2], 800);
+  assert.ok(limits.at(-1) > 200, 'grew above the starting size');
+  assert.ok(limits.every((l) => l <= 10000), 'never exceeds the RPC ceiling');
+});
+
+test('adaptive page size shrinks toward the min on slow responses', async () => {
+  const client = busyClient({ total: 2000, latencyMs: 15 });
+  await drain(new EventPoller(
+    {
+      contractIds: [SAC], startLedger: 4695000, endLedger: 4697000,
+      pageSize: 1000, pageSizeMin: 50, pageSizeMax: 10000, pageSizeSlowMs: 5,
+    },
+    { client, cursors: new MemoryCursorStore(), sleep: async () => {} },
+  ).stream());
+  const limits = client.requests.map((r) => r.limit);
+
+  assert.equal(limits[0], 1000);
+  assert.ok(limits[1] < 1000, 'shrank after a slow response');
+  assert.equal(limits[1], 500, 'halved');
+  assert.ok(limits.every((l) => l >= 50), 'never shrank below the min');
+});
+
+// The issue's acceptance criterion: a benchmark shows fewer round trips on a
+// busy contract with no increase in error rate, and the bounds are configurable.
+test('adaptive page size uses fewer round trips than a fixed page on a busy contract', async () => {
+  const total = 10000;
+
+  // Fixed 200: pin min = max = 200 to disable adaptation.
+  const fixed = busyClient({ total });
+  await drain(new EventPoller(
+    { contractIds: [SAC], startLedger: 4695000, endLedger: 4697000, pageSize: 200, pageSizeMin: 200, pageSizeMax: 200 },
+    { client: fixed, cursors: new MemoryCursorStore(), sleep: async () => {} },
+  ).stream());
+
+  // Adaptive: default bounds (50..10000), starting at 200.
+  const adaptive = busyClient({ total });
+  await drain(new EventPoller(
+    { contractIds: [SAC], startLedger: 4695000, endLedger: 4697000, pageSize: 200 },
+    { client: adaptive, cursors: new MemoryCursorStore(), sleep: async () => {} },
+  ).stream());
+
+  assert.ok(
+    adaptive.requests.length < fixed.requests.length,
+    `adaptive (${adaptive.requests.length}) should need fewer round trips than fixed (${fixed.requests.length})`,
+  );
+  // No increase in error rate: the fast busy contract never fails for either.
+  assert.equal(fixed.errors, 0);
+  assert.equal(adaptive.errors, 0);
+  assert.equal(fixed.requests.length, 51, '10000 events at 200/page is 51 round trips (50 full + 1 short)');
+  assert.ok(adaptive.requests.length <= 7, `adaptive should drain in a handful of trips, got ${adaptive.requests.length}`);
+});
+
+test('pinning pageSizeMin to pageSizeMax disables adaptation', async () => {
+  const client = busyClient({ total: 1000 });
+  await drain(new EventPoller(
+    { contractIds: [SAC], startLedger: 4695000, endLedger: 4697000, pageSize: 100, pageSizeMin: 100, pageSizeMax: 100 },
+    { client, cursors: new MemoryCursorStore(), sleep: async () => {} },
+  ).stream());
+  const limits = client.requests.map((r) => r.limit);
+  assert.ok(limits.every((l) => l === 100), `all limits should stay at 100, got ${limits.join(',')}`);
 });

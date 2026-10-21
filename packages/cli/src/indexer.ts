@@ -90,6 +90,9 @@ export async function runIndexer(options: IndexerOptions): Promise<IndexerResult
     {
       contractIds: config.contractIds,
       pageSize: config.pageSize,
+      pageSizeMin: config.pageSizeMin,
+      pageSizeMax: config.pageSizeMax,
+      pageSizeSlowMs: config.pageSizeSlowMs,
       pollIntervalMs: config.pollIntervalMs,
       ...(config.startLedger !== undefined ? { startLedger: config.startLedger } : {}),
     },

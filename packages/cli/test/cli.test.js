@@ -27,6 +27,9 @@ test('config falls back to documented defaults', () => {
   assert.equal(config.dbPath, './data/lens.db');
   assert.equal(config.apiPort, 8080);
   assert.equal(config.pageSize, 200);
+  assert.equal(config.pageSizeMin, 50);
+  assert.equal(config.pageSizeMax, 10000);
+  assert.equal(config.pageSizeSlowMs, 5000);
   assert.equal(config.pollIntervalMs, 2000);
   assert.deepEqual(config.contractIds, []);
   assert.equal(config.startLedger, undefined);
@@ -69,6 +72,27 @@ test('non-numeric env values fall back instead of becoming NaN', () => {
   assert.equal(config.apiPort, 8080);
   assert.equal(config.pageSize, 200);
   assert.equal(config.startLedger, undefined);
+});
+
+test('adaptive page-size bounds resolve from env and fall back on garbage', () => {
+  const config = resolveConfig({}, {
+    LENS_PAGE_SIZE_MIN: '64', LENS_PAGE_SIZE_MAX: '5000', LENS_PAGE_SIZE_SLOW_MS: '1500',
+  });
+  assert.equal(config.pageSizeMin, 64);
+  assert.equal(config.pageSizeMax, 5000);
+  assert.equal(config.pageSizeSlowMs, 1500);
+
+  const bad = resolveConfig({}, { LENS_PAGE_SIZE_MIN: 'small', LENS_PAGE_SIZE_MAX: '', LENS_PAGE_SIZE_SLOW_MS: 'soon' });
+  assert.equal(bad.pageSizeMin, 50, 'non-numeric falls back to the default');
+  assert.equal(bad.pageSizeMax, 10000);
+  assert.equal(bad.pageSizeSlowMs, 5000);
+
+  const flags = resolveConfig({ pageSizeMin: 10, pageSizeMax: 800, pageSizeSlowMs: 250 }, {
+    LENS_PAGE_SIZE_MIN: '64', LENS_PAGE_SIZE_MAX: '5000',
+  });
+  assert.equal(flags.pageSizeMin, 10, 'flags beat environment');
+  assert.equal(flags.pageSizeMax, 800);
+  assert.equal(flags.pageSizeSlowMs, 250);
 });
 
 test('splitList trims and drops empty entries', () => {
